@@ -180,3 +180,19 @@ cython_debug/
 
 # PyPI configuration file
 .pypirc
+
+# VS Code
+.vscode/
+.vscode-test/
+*.code-workspace
+
+# Julia
+.julia/
+Manifest.toml
+*.jl.cov
+*.jl.*.cov
+*.jl.mem
+
+# Python environment files
+.env.local
+.env.*.local
