@@ -3,6 +3,7 @@ using Plots
 using Random
 using Printf
 using Optim
+using ProgressMeter
 
 const DIMS = 2
 
@@ -25,7 +26,7 @@ Nattempts = 10            # number of random initializations
 # -------------------------------
 # Time evolution parameters
 # -------------------------------
-Tfs = collect(range(0.1, 2.0; length=35))   # Python: np.linspace(0.1, 2, 35)
+Tfs = collect(range(0.1, 2.0; length=10))   # Python: np.linspace(0.1, 2, 35)
 #Tfs = [2.0]                               # run like this to see the actual fields
 fide_opt = zeros(length(Tfs))
 dt = 2.0 / Nts                           # ensure Float64 like Python's 2/Nts
@@ -216,6 +217,8 @@ function run_landau_zener_optimization()
     # Storage for multiple attempts: (length(Tfs) × Nattempts)
     fide_attempts = zeros(length(Tfs), Nattempts)
 
+    progress = Progress(Nattempts * length(Tfs); desc = "Optimizing", dt = dt)
+
     # Warm-up to trigger JIT and cache linear algebra paths
     _warm_x = zeros(Nts)
     _warm_grad = similar(_warm_x)
@@ -229,14 +232,6 @@ function run_landau_zener_optimization()
             t = collect(range(0.0, Tf; length = Nts + 1))
             dt_local = t[2] - t[1]
             t_last = t
-
-            @printf(
-                "Run %d of %d, attempt %d of %d: ",
-                idx_T,
-                length(Tfs),
-                attempt,
-                Nattempts
-            )
 
             # Define objective + gradient closures for this Tf
             cost_fun = x -> control_cost(x, psi0, psiG, dt_local)
@@ -263,7 +258,7 @@ function run_landau_zener_optimization()
                 lower = fill(-c_const, Nts)
                 upper = fill(+c_const, Nts)
                 inner = LBFGS()
-                opts = Optim.Options(g_tol = grad_tol, show_trace = false)
+                opts = Optim.Options(g_tol = grad_tol, show_trace = false, iterations = 200)
                 res = optimize(
                     cost_fun,
                     grad_fun!,
@@ -282,10 +277,13 @@ function run_landau_zener_optimization()
             controls_opt = Optim.minimizer(res)
             final_fide = Optim.minimum(res)
 
-            @printf("Tf/T0=%.2f, Final cost J=%.2E\n", Tf / T0, final_fide,)
             fide_attempts[idx_T, attempt] = final_fide
+
+            next!(progress; showvalues = [(:attempt, attempt), (:Tf, Tf / T0), (:cost, final_fide)])
         end
     end
+
+    finish!(progress)
 
     # For each value of T, pick the best fidelity out of all attempts
     fide_opt = [minimum(view(fide_attempts, mT, :)) for mT = 1:length(Tfs)]
