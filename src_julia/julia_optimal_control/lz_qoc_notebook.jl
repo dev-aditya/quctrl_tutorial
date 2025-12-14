@@ -15,18 +15,18 @@ const H_CTRL = SIGMA_Z
 const Delta = 1.0
 const T0 = π / (2 * Delta)  # unit of time
 const T = pi / Delta        # total evolution time (unused but kept for reference)
-
+SHOW_TRACE = false  # set to true to see optimization trace
 # -----------------------
 # Optimization parameters
 # -----------------------
 grad_tol = 1e-8         # tolerance for gradient
-Nts = 1000           # number of time-steps
+Nts = 100          # number of time-steps
 Nattempts = 10            # number of random initializations
 
 # -------------------------------
 # Time evolution parameters
 # -------------------------------
-Tfs = collect(range(0.1, 2.0; length=10))   # Python: np.linspace(0.1, 2, 35)
+Tfs = collect(range(0.1, 2.0; length = 10))   # Python: np.linspace(0.1, 2, 35)
 #Tfs = [2.0]                               # run like this to see the actual fields
 fide_opt = zeros(length(Tfs))
 dt = 2.0 / Nts                           # ensure Float64 like Python's 2/Nts
@@ -162,8 +162,8 @@ function control_gradient_from_propagators(
 
         # Forward and backward pieces around the j-th control slice
         U_forward = (j == 1) ? Matrix(ID2) : propagators[j-1]
-        U_kplus1 = propagators[j]
-        U_backward = U_total * adjoint(U_kplus1)
+        U_j_plus_1 = propagators[j]
+        U_backward = U_total * adjoint(U_j_plus_1)
 
         dU_dcj = U_backward * duj_dcj * U_forward
         dz_dcj = ψ_target' * (dU_dcj * ψ0)
@@ -204,165 +204,158 @@ end
 # control_gradient!(G, x, ψ0, ψG, dt) fills gradient in-place
 # (and globals/closures: Delta, nu0, T0, Tfs, Nts, Nattempts, grad_tol, guess, etc.)
 
-function run_landau_zener_optimization()
-    start_time = time()
-    controls_opt = nothing      # best controls from previous Tf in the sweep
-    initial_controls = nothing  # store first initialization for plotting when Tfs has length 1
-    final_fide = NaN            # will be updated inside the optimization loops
-    t_last = nothing            # keep last time grid for plotting
 
-    const_crit = Delta^2 / nu0
-    c_const = 2.0  # if set to 0.0, there is no constraint
+start_time = time()
+controls_opt = nothing      # best controls from previous Tf in the sweep
+initial_controls = nothing  # store first initialization for plotting when Tfs has length 1
+final_fide = NaN            # will be updated inside the optimization loops
+t_last = nothing            # keep last time grid for plotting
 
-    # Storage for multiple attempts: (length(Tfs) × Nattempts)
-    fide_attempts = zeros(length(Tfs), Nattempts)
+const_crit = Delta^2 / nu0
+c_const = 2.0  # if set to 0.0, there is no constraint
 
-    progress = Progress(Nattempts * length(Tfs); desc = "Optimizing", dt = dt)
+# Storage for multiple attempts: (length(Tfs) × Nattempts)
+fide_attempts = zeros(length(Tfs), Nattempts)
 
-    # Warm-up to trigger JIT and cache linear algebra paths
-    _warm_x = zeros(Nts)
-    _warm_grad = similar(_warm_x)
-    control_gradient!(_warm_grad, _warm_x, psi0, psiG, 0.1)
-    _ = control_cost(_warm_x, psi0, psiG, 0.1)
+progress = Progress(Nattempts * length(Tfs); desc = "Optimizing", dt = 0.5)
 
-    # Run Nattempts with optional warm-starting across different Tf values
-    for attempt = 1:Nattempts
-        for idx_T = length(Tfs):-1:1  # longest time first
-            Tf = Tfs[idx_T] * T0
-            t = collect(range(0.0, Tf; length = Nts + 1))
-            dt_local = t[2] - t[1]
-            t_last = t
+# Warm-up to trigger JIT and cache linear algebra paths
+_warm_x = zeros(Nts)
+_warm_grad = similar(_warm_x)
+control_gradient!(_warm_grad, _warm_x, psi0, psiG, 0.1)
+_ = control_cost(_warm_x, psi0, psiG, 0.1)
 
-            # Define objective + gradient closures for this Tf
-            cost_fun = x -> control_cost(x, psi0, psiG, dt_local)
-            grad_fun! = (G, x) -> control_gradient!(G, x, psi0, psiG, dt_local)
+# Run Nattempts with optional warm-starting across different Tf values
+for attempt = 1:Nattempts
+    for idx_T = length(Tfs):-1:1  # longest time first
+        Tf = Tfs[idx_T] * T0
+        t = collect(range(0.0, Tf; length = Nts + 1))
+        dt_local = t[2] - t[1]
+        global t_last = t
 
-            # Initialize control field
-            if idx_T == length(Tfs)
-                if guess == "random"
-                    controls_0 = 2.0 .* (rand(Nts) .- 0.5)   # uniform in [-1, 1)
-                elseif guess == "zero"
-                    controls_0 = zeros(Nts)
-                else
-                    error("Unknown guess = $guess")
-                end
-                if isnothing(initial_controls)
-                    initial_controls = controls_0
-                end
+        # Define objective + gradient closures for this Tf
+        cost_fun = x -> control_cost(x, psi0, psiG, dt_local)
+        grad_fun! = (G, x) -> control_gradient!(G, x, psi0, psiG, dt_local)
+
+        # Initialize control field
+        if idx_T == length(Tfs)
+            if guess == "random"
+                controls_0 = 2.0 .* (rand(Nts) .- 0.5)   # uniform in [-1, 1)
+            elseif guess == "zero"
+                controls_0 = zeros(Nts)
             else
-                controls_0 = controls_opt
+                error("Unknown guess = $guess")
             end
-
-            # Run optimization with or without box constraints
-            if c_const != 0.0
-                lower = fill(-c_const, Nts)
-                upper = fill(+c_const, Nts)
-                inner = LBFGS()
-                opts = Optim.Options(g_tol = grad_tol, show_trace = false, iterations = 200)
-                res = optimize(
-                    cost_fun,
-                    grad_fun!,
-                    lower,
-                    upper,
-                    controls_0,
-                    Fminbox(inner),
-                    opts,
-                )
-            else
-                opts = Optim.Options(g_tol = grad_tol, show_trace = false)
-                res = optimize(cost_fun, grad_fun!, controls_0, LBFGS(), opts)
+            if isnothing(initial_controls)
+                global initial_controls = controls_0
             end
-
-            # Store results
-            controls_opt = Optim.minimizer(res)
-            final_fide = Optim.minimum(res)
-
-            fide_attempts[idx_T, attempt] = final_fide
-
-            next!(progress; showvalues = [(:attempt, attempt), (:Tf, Tf / T0), (:cost, final_fide)])
+        else
+            controls_0 = controls_opt
         end
+
+        # Run optimization with or without box constraints
+        if c_const != 0.0
+            lower = fill(-c_const, Nts)
+            upper = fill(+c_const, Nts)
+            inner = LBFGS()
+            opts = Optim.Options(g_tol = grad_tol, show_trace = SHOW_TRACE)
+            res = optimize(
+                cost_fun,
+                grad_fun!,
+                lower,
+                upper,
+                controls_0,
+                Fminbox(inner),
+                opts,
+            )
+        else
+            opts = Optim.Options(g_tol = grad_tol, show_trace = SHOW_TRACE)
+            res = optimize(cost_fun, grad_fun!, controls_0, LBFGS(), opts)
+        end
+
+        # Store results
+        global controls_opt = Optim.minimizer(res)
+        global final_fide = Optim.minimum(res)
+
+        fide_attempts[idx_T, attempt] = final_fide
+
+        next!(progress)
     end
-
-    finish!(progress)
-
-    # For each value of T, pick the best fidelity out of all attempts
-    fide_opt = [minimum(view(fide_attempts, mT, :)) for mT = 1:length(Tfs)]
-
-    # Plotting parameters (colors are arbitrary; Plots.jl doesn't use Matplotlib's "tab:orange" names)
-    colore = [:orange, :blue]
-    lab = ["zero", "random"]
-    ind = 2  # Julia is 1-based; pick 1 or 2
-
-    if length(Tfs) == 1
-        cost_x0 = control_cost(initial_controls, psi0, psiG, dt)
-        p = plot(
-            size = (500, 300),
-            title = @sprintf(
-                "nu0 = %.2f, cost0=%.5f, costF=%.2E",
-                nu0,
-                cost_x0,
-                final_fide
-            ),
-            titlefontsize = 8,
-        )
-
-        # "stairs": use step line types; x for stairs is edges (length Nts+1), y is values (length Nts)
-        edges = t_last ./ (2 * T0)
-
-        plot!(
-            p,
-            edges[1:(end-1)],
-            initial_controls;
-            linetype = :steppost,
-            linestyle = :dash,
-            linewidth = 1.5,
-            color = :gray,
-            label = "Initial",
-        )
-
-        plot!(
-            p,
-            edges[1:(end-1)],
-            controls_opt;
-            linetype = :steppost,
-            linewidth = 2,
-            color = colore[ind],
-            label = "Optimized",
-        )
-
-        ylims!(p, (-2, 2))
-        xlabel!(p, "Time tΔ/π")
-        ylabel!(p, "Field α(t)")
-        display(p)
-
-        # Optional saves (data + plot)
-        # writedlm("Data_Plots_QOC/Fig1-A/Time.txt", t)
-        # writedlm("Data_Plots_QOC/Fig1-A/field_ini_nu0_$(Int(nu0))_$(guess).txt", initial_controls)
-        # writedlm("Data_Plots_QOC/Fig1-A/field_opt_nu0_$(Int(nu0))_$(guess).txt", controls_opt)
-        # savefig(p, "plots/LZ_fields_nu0$(Int(nu0))_alfa0_$(lab[ind]).svg")
-
-    elseif length(Tfs) > 1
-        p = plot(
-            Tfs,
-            fide_opt;
-            yscale = :log10,
-            marker = :circle,
-            linewidth = 2,
-            label = @sprintf("nu0=%.2f", nu0),
-            size = (500, 300),
-        )
-
-        xlabel!(p, "Evolution time T/T0")
-        ylabel!(p, "Optimized cost J(α_opt)")
-        display(p)
-
-        # Optional saves
-        # writedlm(@sprintf("data/LZ_final_cost_nu%.2f_const%.0f_M%d.txt", nu0, c_const, Nts), fide_opt)
-        # writedlm("data/LZ_Tfs.txt", Tfs)
-    end
-
-    return (fide_opt = fide_opt, controls_opt = controls_opt, runtime = time() - start_time)
 end
 
-# Execute when run as a script
-run_landau_zener_optimization()
+finish!(progress)
+
+# For each value of T, pick the best fidelity out of all attempts
+fide_opt = [minimum(view(fide_attempts, mT, :)) for mT = 1:length(Tfs)]
+
+# Plotting parameters (colors are arbitrary; Plots.jl doesn't use Matplotlib's "tab:orange" names)
+colore = [:orange, :blue]
+lab = ["zero", "random"]
+ind = 2  # Julia is 1-based; pick 1 or 2
+
+if length(Tfs) == 1
+    cost_x0 = control_cost(initial_controls, psi0, psiG, dt)
+    p = plot(
+        size = (500, 300),
+        title = @sprintf("nu0 = %.2f, cost0=%.5f, costF=%.2E", nu0, cost_x0, final_fide),
+        titlefontsize = 8,
+    )
+
+    # "stairs": use step line types; x for stairs is edges (length Nts+1), y is values (length Nts)
+    edges = t_last ./ (2 * T0)
+
+    plot!(
+        p,
+        edges[1:(end-1)],
+        initial_controls;
+        linetype = :steppost,
+        linestyle = :dash,
+        linewidth = 1.5,
+        color = :gray,
+        label = "Initial",
+    )
+
+    plot!(
+        p,
+        edges[1:(end-1)],
+        controls_opt;
+        linetype = :steppost,
+        linewidth = 2,
+        color = colore[ind],
+        label = "Optimized",
+    )
+
+    ylims!(p, (-2, 2))
+    xlabel!(p, "Time tΔ/π")
+    ylabel!(p, "Field α(t)")
+    display(p)
+
+    # Optional saves (data + plot)
+    # writedlm("Data_Plots_QOC/Fig1-A/Time.txt", t)
+    # writedlm("Data_Plots_QOC/Fig1-A/field_ini_nu0_$(Int(nu0))_$(guess).txt", initial_controls)
+    # writedlm("Data_Plots_QOC/Fig1-A/field_opt_nu0_$(Int(nu0))_$(guess).txt", controls_opt)
+    # savefig(p, "plots/LZ_fields_nu0$(Int(nu0))_alfa0_$(lab[ind]).svg")
+
+elseif length(Tfs) > 1
+    p = plot(
+        Tfs,
+        abs.(fide_opt),
+        yscale = :log10,
+        marker = :circle,
+        linewidth = 2,
+        grid = true,
+        color = colore[ind],
+        label = @sprintf("nu0=%.2f", nu0),
+        size = (500, 300),
+    )
+
+    xlabel!(p, "Evolution time T/T0")
+    ylabel!(p, "Optimized cost J(α_opt)")
+    display(p)
+
+    # Optional saves
+    # writedlm(@sprintf("data/LZ_final_cost_nu%.2f_const%.0f_M%d.txt", nu0, c_const, Nts), fide_opt)
+    # writedlm("data/LZ_Tfs.txt", Tfs)
+end
+
+@info "Finished" runtime = time() - start_time
