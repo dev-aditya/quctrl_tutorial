@@ -120,22 +120,25 @@ function control_gradient_from_propagators(
     dt::Real,
 )::Vector{Float64}
     n_steps = length(controls)
-    ψf = propagators[end] * ψ0
-    z = ψ_target' * ψf
+    U_total = propagators[end]
+    z = ψ_target' * (U_total * ψ0)
+
     grad = zeros(Float64, n_steps)
     for j = 1:n_steps
         hj = landau_zener_hamiltonian(controls[j])
-        duj_dcj = d_expm_dx(-im * hj * dt, -im * H_CTRL * dt, method = :block)
-        ∂ψ = ψ0
-        for k = 1:(j-1)
-            ∂ψ = propagators[k] * ∂ψ
-        end
-        ∂ψ = duj_dcj * ∂ψ
-        for k = (j+1):n_steps
-            ∂ψ = propagators[k] * ∂ψ
-        end
-        grad[j] = -2 * real(conj(z) * (ψ_target' * ∂ψ))
+        duj_dcj = d_expm_dx(-im * hj * dt, -im * H_CTRL * dt; method = :block)
+
+        # Forward and backward pieces around the j-th control slice
+        U_forward = (j == 1) ? Matrix(ID2) : propagators[j-1]
+        U_kplus1 = propagators[j]
+        U_backward = U_total * adjoint(U_kplus1)
+
+        dU_dcj = U_backward * duj_dcj * U_forward
+        dz_dcj = ψ_target' * (dU_dcj * ψ0)
+
+        grad[j] = -2 * real(dz_dcj * conj(z))
     end
+
     return grad
 end
 
@@ -193,7 +196,7 @@ psiG = [cos(thetaf / 2), sin(thetaf / 2)]
 # Initial guess for the field
 # -----------------------
 
-guess = "random"  # "random" or "zero"
+guess = "zero"  # "random" or "zero"
 
 # Helpers defined above:
 # control_cost(x, ψ0, ψG, dt)::Float64
@@ -204,6 +207,8 @@ function run_landau_zener_optimization()
     start_time = time()
     controls_opt = nothing      # best controls from previous Tf in the sweep
     initial_controls = nothing  # store first initialization for plotting when Tfs has length 1
+    final_fide = NaN            # will be updated inside the optimization loops
+    t_last = nothing            # keep last time grid for plotting
 
     const_crit = Delta^2 / nu0
     c_const = 2.0  # if set to 0.0, there is no constraint
@@ -223,9 +228,10 @@ function run_landau_zener_optimization()
             Tf = Tfs[idx_T] * T0
             t = collect(range(0.0, Tf; length = Nts + 1))
             dt_local = t[2] - t[1]
+            t_last = t
 
             @printf(
-                "Run %d of %d, attempt %d of %d\n",
+                "Run %d of %d, attempt %d of %d: ",
                 idx_T,
                 length(Tfs),
                 attempt,
@@ -257,12 +263,7 @@ function run_landau_zener_optimization()
                 lower = fill(-c_const, Nts)
                 upper = fill(+c_const, Nts)
                 inner = LBFGS()
-                opts = Optim.Options(
-                    g_tol = grad_tol,
-                    show_trace = false,
-                    iterations = 200,
-                    time_limit = 30.0,
-                )
+                opts = Optim.Options(g_tol = grad_tol, show_trace = false)
                 res = optimize(
                     cost_fun,
                     grad_fun!,
@@ -273,12 +274,7 @@ function run_landau_zener_optimization()
                     opts,
                 )
             else
-                opts = Optim.Options(
-                    g_tol = grad_tol,
-                    show_trace = false,
-                    iterations = 200,
-                    time_limit = 30.0,
-                )
+                opts = Optim.Options(g_tol = grad_tol, show_trace = false)
                 res = optimize(cost_fun, grad_fun!, controls_0, LBFGS(), opts)
             end
 
@@ -286,7 +282,7 @@ function run_landau_zener_optimization()
             controls_opt = Optim.minimizer(res)
             final_fide = Optim.minimum(res)
 
-            println(final_fide)
+            @printf("Tf/T0=%.2f, Final cost J=%.2E\n", Tf / T0, final_fide,)
             fide_attempts[idx_T, attempt] = final_fide
         end
     end
@@ -300,9 +296,9 @@ function run_landau_zener_optimization()
     ind = 2  # Julia is 1-based; pick 1 or 2
 
     if length(Tfs) == 1
+        cost_x0 = control_cost(initial_controls, psi0, psiG, dt)
         p = plot(
             size = (500, 300),
-            cost_x0 = control_cost(initial_controls, psi0, psiG, dt),
             title = @sprintf(
                 "nu0 = %.2f, cost0=%.5f, costF=%.2E",
                 nu0,
@@ -313,7 +309,7 @@ function run_landau_zener_optimization()
         )
 
         # "stairs": use step line types; x for stairs is edges (length Nts+1), y is values (length Nts)
-        edges = t ./ (2 * T0)
+        edges = t_last ./ (2 * T0)
 
         plot!(
             p,
