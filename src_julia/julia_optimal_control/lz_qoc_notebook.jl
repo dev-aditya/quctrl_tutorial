@@ -15,6 +15,37 @@ const Delta = 1.0
 const T0 = π / (2 * Delta)  # unit of time
 const T = pi / Delta        # total evolution time (unused but kept for reference)
 
+# -----------------------
+# Optimization parameters
+# -----------------------
+grad_tol = 1e-8         # tolerance for gradient
+Nts = 1000           # number of time-steps
+Nattempts = 10            # number of random initializations
+
+# -------------------------------
+# Time evolution parameters
+# -------------------------------
+Tfs = collect(range(0.1, 2.0; length=35))   # Python: np.linspace(0.1, 2, 35)
+#Tfs = [2.0]                               # run like this to see the actual fields
+fide_opt = zeros(length(Tfs))
+dt = 2.0 / Nts                           # ensure Float64 like Python's 2/Nts
+
+# -----------------------
+# Initial and target state parameters
+# -----------------------
+nu0 = 2.0
+theta0 = atan(-Delta / nu0)                   # assumes Delta is defined
+thetaf = π - theta0
+
+psi0 = [cos(theta0 / 2), sin(theta0 / 2)]
+psiG = [cos(thetaf / 2), sin(thetaf / 2)]
+
+# -----------------------
+# Initial guess for the field
+# -----------------------
+
+guess = "random"  # "random" or "zero"
+
 """
 Landau–Zener Hamiltonian for control value `z`.
 """
@@ -166,37 +197,6 @@ function control_gradient!(
     grad_out .= control_gradient_from_propagators(controls, propagators, ψ0, ψ_target, dt)
     return nothing
 end
-
-# -----------------------
-# Optimization parameters
-# -----------------------
-grad_tol = 1e-6         # tolerance for gradient
-Nts = 10           # number of time-steps
-Nattempts = 5            # number of random initializations
-
-# -------------------------------
-# Time evolution parameters
-# -------------------------------
-# Tfs = collect(range(0.1, 2.0; length=35))   # Python: np.linspace(0.1, 2, 35)
-Tfs = [2.0]                               # run like this to see the actual fields
-fide_opt = zeros(length(Tfs))
-dt = 2.0 / Nts                           # ensure Float64 like Python's 2/Nts
-
-# -----------------------
-# Initial and target state parameters
-# -----------------------
-nu0 = 2.0
-theta0 = atan(-Delta / nu0)                   # assumes Delta is defined
-thetaf = π - theta0
-
-psi0 = [cos(theta0 / 2), sin(theta0 / 2)]
-psiG = [cos(thetaf / 2), sin(thetaf / 2)]
-
-# -----------------------
-# Initial guess for the field
-# -----------------------
-
-guess = "zero"  # "random" or "zero"
 
 # Helpers defined above:
 # control_cost(x, ψ0, ψG, dt)::Float64
