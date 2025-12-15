@@ -26,8 +26,8 @@ Nattempts = 10            # number of random initializations
 # -------------------------------
 # Time evolution parameters
 # -------------------------------
-Tfs = collect(range(0.1, 2.0; length = 10))   # Python: np.linspace(0.1, 2, 35)
-#Tfs = [2.0]                               # run like this to see the actual fields
+#Tfs = collect(range(0.1, 10.0; length = 10))   # Python: np.linspace(0.1, 2, 35)
+Tfs = [3.0]                               # run like this to see the actual fields
 fide_opt = zeros(length(Tfs))
 dt = 2.0 / Nts                           # ensure Float64 like Python's 2/Nts
 
@@ -212,7 +212,7 @@ final_fide = NaN            # will be updated inside the optimization loops
 t_last = nothing            # keep last time grid for plotting
 
 const_crit = Delta^2 / nu0
-c_const = 2.0  # if set to 0.0, there is no constraint
+c_const = 1.0  # if set to 0.0, there is no constraint
 
 # Storage for multiple attempts: (length(Tfs) × Nattempts)
 fide_attempts = zeros(length(Tfs), Nattempts)
@@ -279,7 +279,10 @@ for attempt = 1:Nattempts
 
         fide_attempts[idx_T, attempt] = final_fide
 
-        next!(progress)
+        next!(
+            progress;
+            showvalues = [(:attempt, attempt), (:Tf, Tf / T0), (:cost, final_fide)],
+        )
     end
 end
 
