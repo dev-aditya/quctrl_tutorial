@@ -69,7 +69,7 @@ function forward_propagators(
     controls::AbstractVector{<:Real},
     dt::Real,
 )::Vector{Matrix{ComplexF64}}
-    U = Matrix(ID2)
+    U = Matrix{ComplexF64}(ID2)
     propagators = Vector{Matrix{ComplexF64}}(undef, length(controls))
     for idx in eachindex(controls)
         H = landau_zener_hamiltonian(controls[idx])
