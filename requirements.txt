@@ -6,6 +6,6 @@ qutip
 ipython
 ipykernel
 jaxlib
-jaxlib
+jax
 tqdm
 pyqt5
