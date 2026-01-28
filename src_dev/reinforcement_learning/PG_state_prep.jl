@@ -11,7 +11,7 @@ using Plots
 
 function rl_to_qubit_state(s::AbstractVector{<:Real})
     theta, phi = s
-    return ComplexF64[cos(0.5 * theta), exp(1im * phi) * sin(0.5 * theta)]
+    return ComplexF64[cos(0.5 * theta), exp(1im*phi)*sin(0.5*theta)]
 end
 
 function qubit_to_rl_state(psi::AbstractVector{ComplexF64})
@@ -89,7 +89,13 @@ function logsoftmax(x::AbstractMatrix)
     return y .- lse
 end
 
-function init_params(rng::AbstractRNG, input_dim::Int, hidden1::Int, hidden2::Int, n_actions::Int)
+function init_params(
+    rng::AbstractRNG,
+    input_dim::Int,
+    hidden1::Int,
+    hidden2::Int,
+    n_actions::Int,
+)
     scale = 0.1f0
     W1 = scale .* randn(rng, Float32, hidden1, input_dim)
     b1 = zeros(Float32, hidden1)
@@ -115,7 +121,7 @@ function policy_logprobs(params, state::AbstractVector{<:Real})
     return vec(logp)
 end
 
-function policy_logprobs(params, states::AbstractArray{<:Real, 3})
+function policy_logprobs(params, states::AbstractArray{<:Real,3})
     n_mc, t_steps, input_dim = size(states)
     x = permutedims(states, (3, 1, 2))
     x = reshape(x, input_dim, :)
@@ -138,13 +144,13 @@ end
 # REINFORCE loss + optimizer
 # ---------------------------
 
-function pseudo_loss(params, batch; l2::Float32 = 1f-3)
+function pseudo_loss(params, batch; l2::Float32 = 1.0f-3)
     states, actions, returns = batch
     logp = policy_logprobs(params, states)
     baseline = mean(returns; dims = 1)
     total = 0.0f0
     n_mc, t_steps = size(actions)
-    @inbounds for j in 1:n_mc, t in 1:t_steps
+    @inbounds for j = 1:n_mc, t = 1:t_steps
         total += logp[j, t, actions[j, t]] * (returns[j, t] - baseline[1, t])
     end
     return -(total / n_mc) + l2_regularizer(params, l2)
@@ -166,7 +172,12 @@ function map_params(f, p, q, r)
     return NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q), Tuple(r)))
 end
 
-function adam_init(params; beta1::Float32 = 0.9f0, beta2::Float32 = 0.999f0, eps::Float32 = 1f-8)
+function adam_init(
+    params;
+    beta1::Float32 = 0.9f0,
+    beta2::Float32 = 0.999f0,
+    eps::Float32 = 1.0f-8,
+)
     m = map_params(zero_like, params)
     v = map_params(zero_like, params)
     return (m = m, v = v, t = 0, beta1 = beta1, beta2 = beta2, eps = eps)
@@ -182,12 +193,8 @@ function adam_update(state, params, grads, lr::Float32)
     mhat = map_params(m -> m ./ (1 - beta1 ^ t), m)
     vhat = map_params(v -> v ./ (1 - beta2 ^ t), v)
 
-    params_new = map_params(
-        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ eps)),
-        params,
-        mhat,
-        vhat,
-    )
+    params_new =
+        map_params((p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ eps)), params, mhat, vhat)
 
     return params_new, (m = m, v = v, t = t, beta1 = beta1, beta2 = beta2, eps = eps)
 end
@@ -209,9 +216,9 @@ function sample_action(rng::AbstractRNG, probs::AbstractVector{<:Real})
 end
 
 function rollout_trajectory!(
-    states::Array{Float32, 3},
-    actions::Array{Int, 2},
-    returns::Array{Float32, 2},
+    states::Array{Float32,3},
+    actions::Array{Int,2},
+    returns::Array{Float32,2},
     j::Int,
     env,
     params,
@@ -221,7 +228,7 @@ function rollout_trajectory!(
     s, psi = reset_state(rng; random_init = random_init)
     rewards = Vector{Float32}(undef, env.n_time_steps)
 
-    for t in 1:env.n_time_steps
+    for t = 1:env.n_time_steps
         states[j, t, 1] = Float32(s[1])
         states[j, t, 2] = Float32(s[2])
 
@@ -235,7 +242,7 @@ function rollout_trajectory!(
     end
 
     g = 0.0f0
-    for t in env.n_time_steps:-1:1
+    for t = env.n_time_steps:-1:1
         g += rewards[t]
         returns[j, t] = g
     end
@@ -248,11 +255,11 @@ function train_reinforce(;
     n_mc::Int = 256,
     hidden1::Int = 512,
     hidden2::Int = 256,
-    step_size::Float32 = 1f-3,
-    l2::Float32 = 1f-3,
+    step_size::Float32 = 1.0f-3,
+    l2::Float32 = 1.0f-3,
     random_init::Bool = true,
     print_every::Int = 1,
-    plot_path::Union{Nothing, String} = "RL_1q_training_curve.pdf",
+    plot_path::Union{Nothing,String} = "RL_1q_training_curve.pdf",
 )
     rng = MersenneTwister(seed)
     env = init_env(n_time_steps)
@@ -270,10 +277,10 @@ function train_reinforce(;
 
     @printf("\nStarting training...\n\n")
 
-    for episode in 1:n_episodes
+    for episode = 1:n_episodes
         start_time = time()
 
-        for j in 1:n_mc
+        for j = 1:n_mc
             rollout_trajectory!(
                 states,
                 actions,
@@ -300,7 +307,11 @@ function train_reinforce(;
             @printf("episode %d in %.2f sec\n", episode - 1, time() - start_time)
             @printf("mean reward: %.4f\n", mean_final[episode])
             @printf("return standard deviation: %.4f\n", std_final[episode])
-            @printf("min return: %.4f; max return: %.4f\n\n", min_final[episode], max_final[episode])
+            @printf(
+                "min return: %.4f; max return: %.4f\n\n",
+                min_final[episode],
+                max_final[episode]
+            )
         end
     end
 
@@ -319,17 +330,26 @@ function train_reinforce(;
 end
 
 function plot_learning_curves(metrics; path::String = "RL_1q_training_curve.pdf")
-    episodes = collect(0:(length(metrics.mean_final) - 1))
-    p = plot(
-        episodes,
-        metrics.mean_final,
-        label = "mean final reward",
-        color = :black,
-    )
+    episodes = collect(0:(length(metrics.mean_final)-1))
+    p = plot(episodes, metrics.mean_final, label = "mean final reward", color = :black)
     ribbon = 0.5 .* metrics.std_final
     plot!(p, episodes, metrics.mean_final; ribbon = ribbon, fillalpha = 0.25, label = "")
-    plot!(p, episodes, metrics.min_final; ls = :dash, color = :blue, label = "min final reward")
-    plot!(p, episodes, metrics.max_final; ls = :dash, color = :red, label = "max final reward")
+    plot!(
+        p,
+        episodes,
+        metrics.min_final;
+        ls = :dash,
+        color = :blue,
+        label = "min final reward",
+    )
+    plot!(
+        p,
+        episodes,
+        metrics.max_final;
+        ls = :dash,
+        color = :red,
+        label = "max final reward",
+    )
     xlabel!(p, "episode")
     ylabel!(p, "final reward")
     plot!(p; legend = :bottomright)
