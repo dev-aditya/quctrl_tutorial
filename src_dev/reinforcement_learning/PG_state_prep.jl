@@ -215,6 +215,13 @@ function sample_action(rng::AbstractRNG, probs::AbstractVector{<:Real})
     return length(probs)
 end
 
+"""
+rollout_trajectory!(states, actions, returns, j, env, params, rng; random_init=true)
+
+Collect one Monte Carlo trajectory (one full episode) under the current policy.
+- Writes visited states/actions/returns into the preallocated slots at index `j`.
+- Uses Haar-random initial states when `random_init=true`.
+"""
 function rollout_trajectory!(
     states::Array{Float32,3},
     actions::Array{Int,2},
@@ -280,6 +287,7 @@ function train_reinforce(;
     for episode = 1:n_episodes
         start_time = time()
 
+        # Monte Carlo batch: sample n_mc trajectories with current policy
         for j = 1:n_mc
             rollout_trajectory!(
                 states,
