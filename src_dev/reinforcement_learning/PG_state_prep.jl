@@ -156,6 +156,8 @@ end
 
 function pseudo_loss(params, batch; l2::Float32 = 1.0f-3)
     states, actions, returns = batch
+    # this is the policy_logprobs for all states in the batch
+    # and all actions after all time steps and all MC samples
     logp = policy_logprobs(params, states)
     baseline = mean(returns; dims = 1)
     total = 0.0f0
@@ -163,6 +165,11 @@ function pseudo_loss(params, batch; l2::Float32 = 1.0f-3)
     @inbounds for j = 1:n_mc, t = 1:t_steps
         total += logp[j, t, actions[j, t]] * (returns[j, t] - baseline[1, t])
     end
+    # returns the negative of the expected return (to minimize) plus L2 regularization
+    # we want to maximize the expected return, so we minimize its negative
+    # we then apply the gradient descent on this pseudo-loss function.
+    # reason it's called pseudo-loss is that it's not a true loss function 
+    # in the supervised learning sense, but rather a construct to facilitate policy gradient optimization
     return -(total / n_mc) + l2_regularizer(params, l2)
 end
 
