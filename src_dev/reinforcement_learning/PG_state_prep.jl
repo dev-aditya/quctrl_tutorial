@@ -79,9 +79,19 @@ end
 # ---------------------------
 # Policy network (functional)
 # ---------------------------
+"""
+Rectified Linear Unit activation:
 
+It makes the network non-linear so it can learn non-linear mappings.
+"""
 relu(x) = max.(x, 0)
 
+"""
+log of softmax function applied to each column of input matrix x
+Softmax function: converts raw scores (logits) into probabilities that sum to 1.
+For a vector x = [x₁, x₂, …, xₙ]:
+softmax(xᵢ) = exp(xᵢ) / Σⱼ exp(xⱼ)
+"""
 function logsoftmax(x::AbstractMatrix)
     xmax = maximum(x; dims = 1)
     y = x .- xmax
@@ -105,22 +115,22 @@ function init_params(
     b3 = zeros(Float32, n_actions)
     return (W1 = W1, b1 = b1, W2 = W2, b2 = b2, W3 = W3, b3 = b3)
 end
-
+# Forward pass through the neural network to get action logits and then put it in log-softmax to get log-probabilities.
 function forward_logits(params, x::AbstractMatrix{Float32})
-    z1 = params.W1 * x .+ params.b1
-    a1 = relu(z1)
+    z1 = params.W1 * x .+ params.b1 # Linear transformation
+    a1 = relu(z1) # Activation function: as it activates non-linearity (an neuron "fires" only if input > 0)
     z2 = params.W2 * a1 .+ params.b2
     a2 = relu(z2)
     return params.W3 * a2 .+ params.b3
 end
-
+# log π(a|s) for a single state
 function policy_logprobs(params, state::AbstractVector{<:Real})
     x = reshape(Float32.(state), :, 1)
     logits = forward_logits(params, x)
     logp = logsoftmax(logits)
     return vec(logp)
 end
-
+# log π(a|s) for a batch of states (states: n_mc x t_steps x input_dim)
 function policy_logprobs(params, states::AbstractArray{<:Real,3})
     n_mc, t_steps, input_dim = size(states)
     x = permutedims(states, (3, 1, 2))
@@ -172,6 +182,12 @@ function map_params(f, p, q, r)
     return NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q), Tuple(r)))
 end
 
+"""
+adam_init(params; beta1=0.9f0, beta2=0.999f0, eps=1e-8)
+
+Create the Adam optimizer state (first/second-moment accumulators `m`,`v`
+matching the parameter structure) and the timestep counter `t`.
+"""
 function adam_init(
     params;
     beta1::Float32 = 0.9f0,
@@ -183,6 +199,10 @@ function adam_init(
     return (m = m, v = v, t = 0, beta1 = beta1, beta2 = beta2, eps = eps)
 end
 
+# Adam keeps two moving averages: m_t (first moment = exponential moving average of gradients) and
+# v_t (second moment = EMA of squared gradients). Each step it bias-corrects
+# them and scales the update: params -= lr * mhat / (sqrt(vhat) + eps).
+# This is richer than a plain gradient step x <- x + α * grad(cost).
 function adam_update(state, params, grads, lr::Float32)
     t = state.t + 1
     beta1, beta2, eps = state.beta1, state.beta2, state.eps
@@ -270,10 +290,10 @@ function train_reinforce(;
 )
     rng = MersenneTwister(seed)
     env = init_env(n_time_steps)
-    params = init_params(rng, 2, hidden1, hidden2, env.n_actions)
+    params = init_params(rng, length(env.s_target), hidden1, hidden2, env.n_actions)
     opt_state = adam_init(params)
 
-    states = Array{Float32}(undef, n_mc, env.n_time_steps, 2)
+    states = Array{Float32}(undef, n_mc, env.n_time_steps, length(env.s_target))
     actions = Array{Int}(undef, n_mc, env.n_time_steps)
     returns = Array{Float32}(undef, n_mc, env.n_time_steps)
 
@@ -379,6 +399,5 @@ function run_smoke_test()
     return params, metrics
 end
 
-if abspath(PROGRAM_FILE) == @__FILE__
-    run_smoke_test()
-end
+
+run_smoke_test()
