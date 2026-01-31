@@ -207,23 +207,23 @@ function init_params_gaussian(rng::AbstractRNG, input_dim::Int, hidden::Int, n_o
     return (W1 = W1, b1 = b1, Wm = Wm, bm = bm, Ws = Ws, bs = bs)
 end
 
-function forward_gaussian(params, x::AbstractMatrix{Float32})
-    h = relu.(params.W1 * x .+ params.b1)
-    means = params.Wm * h .+ params.bm
-    stds = softplus.(params.Ws * h .+ params.bs) .+ 1.0f-3
+function forward_gaussian(nn_params, x::AbstractMatrix{Float32})
+    h = relu.(nn_params.W1 * x .+ nn_params.b1)
+    means = nn_params.Wm * h .+ nn_params.bm
+    stds = softplus.(nn_params.Ws * h .+ nn_params.bs) .+ 1.0f-3
     return means, stds
 end
 
-function policy_gaussian(params, state_vec::AbstractVector{<:Real})
+function policy_gaussian(nn_params, state_vec::AbstractVector{<:Real})
     x = reshape(Float32.(state_vec), :, 1)
-    return forward_gaussian(params, x)
+    return forward_gaussian(nn_params, x)
 end
 
-function policy_gaussian(params, states::Array{Float32,3})
+function policy_gaussian(nn_params, states::Array{Float32,3})
     n_mc, t_steps, input_dim = size(states)
     x = permutedims(states, (3, 1, 2))
     x = reshape(x, input_dim, :)
-    means, stds = forward_gaussian(params, x)
+    means, stds = forward_gaussian(nn_params, x)
     means = reshape(means, :, n_mc, t_steps)
     stds = reshape(stds, :, n_mc, t_steps)
     return permutedims(means, (2, 3, 1)), permutedims(stds, (2, 3, 1))
@@ -233,22 +233,22 @@ end
 # REINFORCE pseudo-loss (Gaussian log-prob)
 # -----------------------------------------------------------------------------
 
-function l2_regularizer(params, λ::Float32)
+function l2_regularizer(nn_params, λ::Float32)
     tot = 0.0f0
-    for p in Tuple(params)
+    for p in Tuple(nn_params)
         tot += sum(abs2, p)
     end
     return λ * tot
 end
 
-function pseudo_loss(params, batch; λ::Float32 = 1.0f-3)
+function pseudo_loss(nn_params, batch; λ::Float32 = 1.0f-3)
     states, actions, returns = batch
-    means, stds = policy_gaussian(params, states)  # shapes (N, T, 3)
+    means, stds = policy_gaussian(nn_params, states)  # shapes (N, T, 3)
     baseline = mean(returns; dims = 1)
     diff = (actions .- means) ./ stds
     log_pi = .-0.5f0 .* sum(diff .^ 2 .+ 2.0f0 .* log.(stds); dims = 3)
     adv = returns .- baseline
-    return -mean(sum(log_pi .* adv; dims = 2)) + l2_regularizer(params, λ)
+    return -mean(sum(log_pi .* adv; dims = 2)) + l2_regularizer(nn_params, λ)
 end
 
 # -----------------------------------------------------------------------------
@@ -263,25 +263,29 @@ map_params(f, p, q) = NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q)))
 map_params(f, p, q, r) = NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q), Tuple(r)))
 
 function adam_init(
-    params;
+    nn_params;
     beta1::Float32 = 0.9f0,
     beta2::Float32 = 0.999f0,
     eps::Float32 = 1.0f-8,
 )
-    m = map_params(zero_like, params)
-    v = map_params(zero_like, params)
+    m = map_params(zero_like, nn_params)
+    v = map_params(zero_like, nn_params)
     return (m = m, v = v, t = 0, beta1 = beta1, beta2 = beta2, eps = eps)
 end
 
-function adam_update(state, params, grads, lr::Float32)
+function adam_update(state, nn_params, grads, lr::Float32)
     t = state.t + 1
     β1, β2, ϵ = state.beta1, state.beta2, state.eps
     m = map_params((m, g) -> β1 * m + (1 - β1) * g, state.m, grads)
     v = map_params((v, g) -> β2 * v + (1 - β2) * (g .^ 2), state.v, grads)
     mhat = map_params(m -> m ./ (1 - β1^t), m)
     vhat = map_params(v -> v ./ (1 - β2^t), v)
-    params_new =
-        map_params((p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ ϵ)), params, mhat, vhat)
+    params_new = map_params(
+        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ ϵ)),
+        nn_params,
+        mhat,
+        vhat,
+    )
     return params_new, (m = m, v = v, t = t, beta1 = β1, beta2 = β2, eps = ϵ)
 end
 
@@ -304,14 +308,14 @@ function rollout!(
     returns::Array{Float32,2},
     j::Int,
     env::QuantumEnv,
-    params,
+    nn_params,
 )
     reset!(env)
     rewards = Vector{Float32}(undef, env.n_time_steps)
     for t = 1:env.n_time_steps
         s = vec(env.state)
         states[j, t, :] = Float32.(s)
-        μ, σ = policy_gaussian(params, s)
+        μ, σ = policy_gaussian(nn_params, s)
         a = sample_action(env.rng, vec(μ), vec(σ))
         actions[j, t, :] = Float32.(collect(a))
         _, r, _ = step!(env, a)
@@ -337,8 +341,8 @@ function train_quantum_env(;
     env = QuantumEnv(n_time_steps; seed = seed)
     rng = env.rng
     input_dim = 3 * n_time_steps
-    params = init_params_gaussian(rng, input_dim, hidden, 3)
-    opt_state = adam_init(params)
+    nn_params = init_params_gaussian(rng, input_dim, hidden, 3)
+    opt_state = adam_init(nn_params)
 
     states = Array{Float32}(undef, n_mc, n_time_steps, input_dim)
     actions = Array{Float32}(undef, n_mc, n_time_steps, 3)
@@ -355,18 +359,18 @@ function train_quantum_env(;
     for episode = 1:n_episodes
         start = time()
         for j = 1:n_mc
-            rollout!(states, actions, returns, j, env, params)
+            rollout!(states, actions, returns, j, env, nn_params)
         end
         batch = (states, actions, returns)
-        grads = Zygote.gradient(p -> pseudo_loss(p, batch; λ = Float32(λ)), params)[1]
-        params, opt_state = adam_update(opt_state, params, grads, Float32(step_size))
+        grads = Zygote.gradient(p -> pseudo_loss(p, batch; λ = Float32(λ)), nn_params)[1]
+        nn_params, opt_state = adam_update(opt_state, nn_params, grads, Float32(step_size))
 
         final_rewards = @view returns[:, end]
         mean_final[episode] = mean(final_rewards)
         std_final[episode] = std(final_rewards)
         min_final[episode] = minimum(final_rewards)
         max_final[episode] = maximum(final_rewards)
-        p_loss[episode] = pseudo_loss(params, batch; λ = λ)
+        p_loss[episode] = pseudo_loss(nn_params, batch; λ = λ)
 
         @printf(
             "episode %d in %.2f sec | mean R=%.4f | max R=%.4f | loss=%.4f\n",
@@ -392,7 +396,7 @@ function train_quantum_env(;
         savefig(p, plot_path)
     end
 
-    return params,
+    return nn_params,
     (
         mean_final = mean_final,
         std_final = std_final,

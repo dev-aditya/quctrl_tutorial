@@ -116,35 +116,35 @@ function init_params(
     return (W1 = W1, b1 = b1, W2 = W2, b2 = b2, W3 = W3, b3 = b3)
 end
 # Forward pass through the neural network to get action logits and then put it in log-softmax to get log-probabilities.
-function forward_logits(params, x::AbstractMatrix{Float32})
-    z1 = params.W1 * x .+ params.b1 # Linear transformation
+function forward_logits(nn_params, x::AbstractMatrix{Float32})
+    z1 = nn_params.W1 * x .+ nn_params.b1 # Linear transformation
     a1 = relu(z1) # Activation function: as it activates non-linearity (an neuron "fires" only if input > 0)
-    z2 = params.W2 * a1 .+ params.b2
+    z2 = nn_params.W2 * a1 .+ nn_params.b2
     a2 = relu(z2)
-    return params.W3 * a2 .+ params.b3
+    return nn_params.W3 * a2 .+ nn_params.b3
 end
 # log π(a|s) for a single state
-function policy_logprobs(params, state::AbstractVector{<:Real})
+function policy_logprobs(nn_params, state::AbstractVector{<:Real})
     x = reshape(Float32.(state), :, 1)
-    logits = forward_logits(params, x)
+    logits = forward_logits(nn_params, x)
     logp = logsoftmax(logits)
     return vec(logp)
 end
 # log π(a|s) for a batch of states (states: n_mc x t_steps x input_dim)
-function policy_logprobs(params, states::AbstractArray{<:Real,3})
+function policy_logprobs(nn_params, states::AbstractArray{<:Real,3})
     n_mc, t_steps, input_dim = size(states)
     x = permutedims(states, (3, 1, 2))
     x = reshape(x, input_dim, :)
     x = Float32.(x)
-    logits = forward_logits(params, x)
+    logits = forward_logits(nn_params, x)
     logp = logsoftmax(logits)
     logp = reshape(logp, size(logp, 1), n_mc, t_steps)
     return permutedims(logp, (2, 3, 1))
 end
 
-function l2_regularizer(params, lmbda::Float32)
+function l2_regularizer(nn_params, lmbda::Float32)
     total = 0.0f0
-    for p in Tuple(params)
+    for p in Tuple(nn_params)
         total += sum(abs2, p)
     end
     return lmbda * total
@@ -154,11 +154,11 @@ end
 # REINFORCE loss + optimizer
 # ---------------------------
 
-function pseudo_loss(params, batch; l2::Float32 = 1.0f-3)
+function pseudo_loss(nn_params, batch; l2::Float32 = 1.0f-3)
     states, actions, returns = batch
     # this is the policy_logprobs for all states in the batch
     # and all actions after all time steps and all MC samples
-    logp = policy_logprobs(params, states)
+    logp = policy_logprobs(nn_params, states)
     baseline = mean(returns; dims = 1)
     total = 0.0f0
     n_mc, t_steps = size(actions)
@@ -170,7 +170,7 @@ function pseudo_loss(params, batch; l2::Float32 = 1.0f-3)
     # we then apply the gradient descent on this pseudo-loss function.
     # reason it's called pseudo-loss is that it's not a true loss function 
     # in the supervised learning sense, but rather a construct to facilitate policy gradient optimization
-    return -(total / n_mc) + l2_regularizer(params, l2)
+    return -(total / n_mc) + l2_regularizer(nn_params, l2)
 end
 
 function zero_like(p)
@@ -190,27 +190,27 @@ function map_params(f, p, q, r)
 end
 
 """
-adam_init(params; beta1=0.9f0, beta2=0.999f0, eps=1e-8)
+adam_init(nn_params; beta1=0.9f0, beta2=0.999f0, eps=1e-8)
 
 Create the Adam optimizer state (first/second-moment accumulators `m`,`v`
 matching the parameter structure) and the timestep counter `t`.
 """
 function adam_init(
-    params;
+    nn_params;
     beta1::Float32 = 0.9f0,
     beta2::Float32 = 0.999f0,
     eps::Float32 = 1.0f-8,
 )
-    m = map_params(zero_like, params)
-    v = map_params(zero_like, params)
+    m = map_params(zero_like, nn_params)
+    v = map_params(zero_like, nn_params)
     return (m = m, v = v, t = 0, beta1 = beta1, beta2 = beta2, eps = eps)
 end
 
 # Adam keeps two moving averages: m_t (first moment = exponential moving average of gradients) and
 # v_t (second moment = EMA of squared gradients). Each step it bias-corrects
-# them and scales the update: params -= lr * mhat / (sqrt(vhat) + eps).
+# them and scales the update: nn_params -= lr * mhat / (sqrt(vhat) + eps).
 # This is richer than a plain gradient step x <- x + α * grad(cost).
-function adam_update(state, params, grads, lr::Float32)
+function adam_update(state, nn_params, grads, lr::Float32)
     t = state.t + 1
     beta1, beta2, eps = state.beta1, state.beta2, state.eps
 
@@ -220,8 +220,12 @@ function adam_update(state, params, grads, lr::Float32)
     mhat = map_params(m -> m ./ (1 - beta1 ^ t), m)
     vhat = map_params(v -> v ./ (1 - beta2 ^ t), v)
 
-    params_new =
-        map_params((p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ eps)), params, mhat, vhat)
+    params_new = map_params(
+        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ eps)),
+        nn_params,
+        mhat,
+        vhat,
+    )
 
     return params_new, (m = m, v = v, t = t, beta1 = beta1, beta2 = beta2, eps = eps)
 end
@@ -243,7 +247,7 @@ function sample_action(rng::AbstractRNG, probs::AbstractVector{<:Real})
 end
 
 """
-rollout_trajectory!(states, actions, returns, j, env, params, rng; random_init=true)
+rollout_trajectory!(states, actions, returns, j, env, nn_params, rng; random_init=true)
 
 Collect one Monte Carlo trajectory (one full episode) under the current policy.
 - Writes visited states/actions/returns into the preallocated slots at index `j`.
@@ -255,7 +259,7 @@ function rollout_trajectory!(
     returns::Array{Float32,2},
     j::Int,
     env,
-    params,
+    nn_params,
     rng::AbstractRNG;
     random_init::Bool = true,
 )
@@ -266,7 +270,7 @@ function rollout_trajectory!(
         states[j, t, 1] = Float32(s[1])
         states[j, t, 2] = Float32(s[2])
 
-        logp = policy_logprobs(params, s)
+        logp = policy_logprobs(nn_params, s)
         probs = exp.(logp)
         action = sample_action(rng, probs)
         actions[j, t] = action
@@ -297,8 +301,8 @@ function train_reinforce(;
 )
     rng = MersenneTwister(seed)
     env = init_env(n_time_steps)
-    params = init_params(rng, length(env.s_target), hidden1, hidden2, env.n_actions)
-    opt_state = adam_init(params)
+    nn_params = init_params(rng, length(env.s_target), hidden1, hidden2, env.n_actions)
+    opt_state = adam_init(nn_params)
 
     states = Array{Float32}(undef, n_mc, env.n_time_steps, length(env.s_target))
     actions = Array{Int}(undef, n_mc, env.n_time_steps)
@@ -322,15 +326,15 @@ function train_reinforce(;
                 returns,
                 j,
                 env,
-                params,
+                nn_params,
                 rng;
                 random_init = random_init,
             )
         end
 
         batch = (states, actions, returns)
-        grads = Zygote.gradient(p -> pseudo_loss(p, batch; l2 = l2), params)[1]
-        params, opt_state = adam_update(opt_state, params, grads, step_size)
+        grads = Zygote.gradient(p -> pseudo_loss(p, batch; l2 = l2), nn_params)[1]
+        nn_params, opt_state = adam_update(opt_state, nn_params, grads, step_size)
 
         final_rewards = @view returns[:, end]
         mean_final[episode] = mean(final_rewards)
@@ -361,7 +365,7 @@ function train_reinforce(;
         plot_learning_curves(metrics; path = plot_path)
     end
 
-    return params, metrics
+    return nn_params, metrics
 end
 
 function plot_learning_curves(metrics; path::String = "RL_1q_training_curve.pdf")
@@ -395,7 +399,7 @@ end
 
 function run_smoke_test()
     # Fast sanity check: small network + few episodes.
-    params, metrics = train_reinforce(
+    nn_params, metrics = train_reinforce(
         n_episodes = 3,
         n_mc = 32,
         hidden1 = 64,
@@ -403,7 +407,7 @@ function run_smoke_test()
         plot_path = nothing,
         print_every = 1,
     )
-    return params, metrics
+    return nn_params, metrics
 end
 
 

@@ -150,9 +150,9 @@ function init_params_discrete(rng::AbstractRNG, input_dim::Int, hidden::Int, n_a
     return (W1 = W1, b1 = b1, W2 = W2, b2 = b2)
 end
 
-function forward_logits(params, x::AbstractMatrix{Float32})
-    h = relu.(params.W1 * x .+ params.b1)
-    return params.W2 * h .+ params.b2
+function forward_logits(nn_params, x::AbstractMatrix{Float32})
+    h = relu.(nn_params.W1 * x .+ nn_params.b1)
+    return nn_params.W2 * h .+ nn_params.b2
 end
 
 function logsoftmax(x::AbstractMatrix)
@@ -162,17 +162,17 @@ function logsoftmax(x::AbstractMatrix)
     return y .- lse
 end
 
-function policy_logprobs(params, state::AbstractVector{<:Real})
+function policy_logprobs(nn_params, state::AbstractVector{<:Real})
     x = reshape(Float32.(state), :, 1)
-    logits = forward_logits(params, x)
+    logits = forward_logits(nn_params, x)
     return vec(logsoftmax(logits))
 end
 
-function policy_logprobs(params, states::Array{Float32,3})
+function policy_logprobs(nn_params, states::Array{Float32,3})
     n_mc, t_steps, input_dim = size(states)
     x = permutedims(states, (3, 1, 2))
     x = reshape(x, input_dim, :)
-    logits = forward_logits(params, x)
+    logits = forward_logits(nn_params, x)
     logp = logsoftmax(logits)
     logp = reshape(logp, size(logp, 1), n_mc, t_steps)
     return permutedims(logp, (2, 3, 1))
@@ -182,9 +182,9 @@ end
 # Loss (REINFORCE + entropy bonus)
 # -----------------------------------------------------------------------------
 
-function l2_regularizer(params, λ::Float32 = 1.0f-3)
+function l2_regularizer(nn_params, λ::Float32 = 1.0f-3)
     tot = 0.0f0
-    for p in Tuple(params)
+    for p in Tuple(nn_params)
         tot += sum(abs2, p)
     end
     return λ * tot
@@ -196,9 +196,9 @@ function policy_entropy(preds_select, n_actions::Int, βinv = 1e-1)
     return βinv .* ent
 end
 
-function pseudo_loss(params, batch, n_actions; λ::Float32 = 1.0f-3)
+function pseudo_loss(nn_params, batch, n_actions; λ::Float32 = 1.0f-3)
     states, actions, returns = batch
-    preds = policy_logprobs(params, states)
+    preds = policy_logprobs(nn_params, states)
     baseline = mean(returns; dims = 1)
     adv = returns .- baseline
     traj_terms = Float32[
@@ -213,7 +213,7 @@ function pseudo_loss(params, batch, n_actions; λ::Float32 = 1.0f-3)
     ]
     loss_core = -mean(traj_terms)
     loss_ent = -(0.1f0 / log(Float32(n_actions))) * mean(traj_ent)
-    return loss_core + loss_ent + l2_regularizer(params, λ)
+    return loss_core + loss_ent + l2_regularizer(nn_params, λ)
 end
 
 # -----------------------------------------------------------------------------
@@ -229,25 +229,29 @@ map_params(f, p, q) = NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q)))
 map_params(f, p, q, r) = NamedTuple{keys(p)}(map(f, Tuple(p), Tuple(q), Tuple(r)))
 
 function adam_init(
-    params;
+    nn_params;
     beta1::Float32 = 0.9f0,
     beta2::Float32 = 0.999f0,
     eps::Float32 = 1.0f-8,
 )
-    m = map_params(zero_like, params)
-    v = map_params(zero_like, params)
+    m = map_params(zero_like, nn_params)
+    v = map_params(zero_like, nn_params)
     return (m = m, v = v, t = 0, beta1 = beta1, beta2 = beta2, eps = eps)
 end
 
-function adam_update(state, params, grads, lr::Float32)
+function adam_update(state, nn_params, grads, lr::Float32)
     t = state.t + 1
     β1, β2, ϵ = state.beta1, state.beta2, state.eps
     m = map_params((m, g) -> β1 * m + (1 - β1) * g, state.m, grads)
     v = map_params((v, g) -> β2 * v + (1 - β2) * (g .^ 2), state.v, grads)
     mhat = map_params(m -> m ./ (1 - β1^t), m)
     vhat = map_params(v -> v ./ (1 - β2^t), v)
-    params_new =
-        map_params((p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ ϵ)), params, mhat, vhat)
+    params_new = map_params(
+        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ ϵ)),
+        nn_params,
+        mhat,
+        vhat,
+    )
     return params_new, (m = m, v = v, t = t, beta1 = β1, beta2 = β2, eps = ϵ)
 end
 
@@ -274,13 +278,13 @@ function rollout!(
     returns::Array{Float32,2},
     j::Int,
     env::STAEnv,
-    params,
+    nn_params,
 )
     reset!(env)
     rewards = Vector{Float32}(undef, env.n_time_steps)
     for t = 1:env.n_time_steps
         states[j, t, :] = Float32.(env.state)
-        logp = policy_logprobs(params, env.state)
+        logp = policy_logprobs(nn_params, env.state)
         action_idx = sample_action(env.rng, logp)
         actions[j, t] = action_idx
         _, r, _ = step!(env, action_idx)
@@ -305,8 +309,8 @@ function train_sta(;
 )
     env = STAEnv(n_time_steps; seed = seed)
     rng = env.rng
-    params = init_params_discrete(rng, 2, hidden, env.n_actions)
-    opt_state = adam_init(params)
+    nn_params = init_params_discrete(rng, 2, hidden, env.n_actions)
+    opt_state = adam_init(nn_params)
 
     states = Array{Float32}(undef, n_mc, env.n_time_steps, 2)
     actions = Array{Int}(undef, n_mc, env.n_time_steps)
@@ -325,14 +329,14 @@ function train_sta(;
     for episode = 1:n_episodes
         start = time()
         for j = 1:n_mc
-            rollout!(states, actions, returns, j, env, params)
+            rollout!(states, actions, returns, j, env, nn_params)
         end
         batch = (states, actions, returns)
         grads = Zygote.gradient(
             p -> pseudo_loss(p, batch, env.n_actions; λ = Float32(λ)),
-            params,
+            nn_params,
         )[1]
-        params, opt_state = adam_update(opt_state, params, grads, Float32(step_size))
+        nn_params, opt_state = adam_update(opt_state, nn_params, grads, Float32(step_size))
 
         final_rewards = @view returns[:, end]
         mean_final[episode] = mean(final_rewards)
@@ -374,7 +378,7 @@ function train_sta(;
         savefig(p, plot_path)
     end
 
-    return params,
+    return nn_params,
     (
         mean_final = mean_final,
         std_final = std_final,
