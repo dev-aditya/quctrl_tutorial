@@ -48,11 +48,11 @@ function STAEnv(n_time_steps::Int; seed::Int = 0)
     delta_h = (h_target - h_init) / (max_action * n_time_steps)
 
     Id = ComplexF64[1 0; 0 1]
-    σx = ComplexF64[0 1; 1 0]
-    σy = ComplexF64[0 -1im; 1im 0]
-    σz = ComplexF64[1 0; 0 -1]
+    sigma_x = ComplexF64[0 1; 1 0]
+    sigma_y = ComplexF64[0 -1im; 1im 0]
+    sigma_z = ComplexF64[1 0; 0 -1]
 
-    H = h -> Delta * σx + h * σz
+    H = h -> Delta * sigma_x + h * sigma_z
     E_init, V_init = eigen(H(h_init))
     psi_init = V_init[:, argmin(real.(E_init))]
     E_target, V_target = eigen(H(h_target))
@@ -72,9 +72,9 @@ function STAEnv(n_time_steps::Int; seed::Int = 0)
         h_target,
         delta_h,
         Id,
-        σx,
-        σy,
-        σz,
+        sigma_x,
+        sigma_y,
+        sigma_z,
         psi_init,
         psi_target,
         state,
@@ -123,16 +123,16 @@ function step!(env::STAEnv, action_idx::Int)
 end
 
 function state_to_qubit(env::STAEnv, s::AbstractVector{<:Real})
-    θ, ϕ = s
-    return ComplexF64[cos(0.5 * θ), exp(1im*ϕ)*sin(0.5*θ)]
+    theta, phi = s
+    return ComplexF64[cos(0.5 * theta), exp(1im*phi)*sin(0.5*theta)]
 end
 
-function qubit_to_state(env::STAEnv, ψ::AbstractVector{ComplexF64})
-    α = angle(ψ[1])
-    ψn = exp(-1im * α) * ψ
-    θ = 2 * acos(real(ψn[1]))
-    ϕ = angle(ψn[2])
-    return [θ, ϕ]
+function qubit_to_state(env::STAEnv, psi::AbstractVector{ComplexF64})
+    alpha = angle(psi[1])
+    psin = exp(-1im * alpha) * psi
+    theta = 2 * acos(real(psin[1]))
+    phi = angle(psin[2])
+    return [theta, phi]
 end
 
 # -----------------------------------------------------------------------------
@@ -182,38 +182,36 @@ end
 # Loss (REINFORCE + entropy bonus)
 # -----------------------------------------------------------------------------
 
-function l2_regularizer(nn_params, λ::Float32 = 1.0f-3)
+function l2_regularizer(nn_params, l2::Float32 = 1.0f-3)
     tot = 0.0f0
     for p in Tuple(nn_params)
         tot += sum(abs2, p)
     end
-    return λ * tot
+    return l2 * tot
 end
 
-function policy_entropy(preds_select, n_actions::Int, βinv = 1e-1)
+function policy_entropy(preds_select, n_actions::Int, betainv = 1e-1)
     ent_max = log(Float32(n_actions))
     ent = -sum(preds_select .* exp.(preds_select); dims = 2) ./ ent_max
-    return βinv .* ent
+    return betainv .* ent
 end
 
-function pseudo_loss(nn_params, batch, n_actions; λ::Float32 = 1.0f-3)
+function pseudo_loss(nn_params, batch, n_actions; l2::Float32 = 1.0f-3)
     states, actions, returns = batch
     preds = policy_logprobs(nn_params, states)
     baseline = mean(returns; dims = 1)
-    adv = returns .- baseline
-    traj_terms = Float32[
-        sum(preds[j, t, actions[j, t]] * adv[j, t] for t in axes(actions, 2)) for
-        j in axes(actions, 1)
-    ]
-    traj_ent = Float32[
-        sum(
-            preds[j, t, actions[j, t]] * exp(preds[j, t, actions[j, t]]) for
-            t in axes(actions, 2)
-        ) for j in axes(actions, 1)
-    ]
-    loss_core = -mean(traj_terms)
-    loss_ent = -(0.1f0 / log(Float32(n_actions))) * mean(traj_ent)
-    return loss_core + loss_ent + l2_regularizer(nn_params, λ)
+    total = 0.0f0
+    total_ent = 0.0f0
+    n_mc, t_steps = size(actions)
+    @inbounds for j = 1:n_mc, t = 1:t_steps
+        lp = preds[j, t, actions[j, t]]
+        adv = returns[j, t] - baseline[1, t]
+        total += lp * adv
+        total_ent += lp * exp(lp)
+    end
+    loss_core = -(total / n_mc)
+    loss_ent = -(0.1f0 / log(Float32(n_actions))) * (total_ent / n_mc)
+    return loss_core + loss_ent + l2_regularizer(nn_params, l2)
 end
 
 # -----------------------------------------------------------------------------
@@ -241,18 +239,18 @@ end
 
 function adam_update(state, nn_params, grads, lr::Float32)
     t = state.t + 1
-    β1, β2, ϵ = state.beta1, state.beta2, state.eps
-    m = map_params((m, g) -> β1 * m + (1 - β1) * g, state.m, grads)
-    v = map_params((v, g) -> β2 * v + (1 - β2) * (g .^ 2), state.v, grads)
-    mhat = map_params(m -> m ./ (1 - β1^t), m)
-    vhat = map_params(v -> v ./ (1 - β2^t), v)
+    beta1, beta2, eps = state.beta1, state.beta2, state.eps
+    m = map_params((m, g) -> beta1 * m + (1 - beta1) * g, state.m, grads)
+    v = map_params((v, g) -> beta2 * v + (1 - beta2) * (g .^ 2), state.v, grads)
+    mhat = map_params(m -> m ./ (1 - beta1^t), m)
+    vhat = map_params(v -> v ./ (1 - beta2^t), v)
     params_new = map_params(
-        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ ϵ)),
+        (p, mh, vh) -> p .- lr .* (mh ./ (sqrt.(vh) .+ eps)),
         nn_params,
         mhat,
         vhat,
     )
-    return params_new, (m = m, v = v, t = t, beta1 = β1, beta2 = β2, eps = ϵ)
+    return params_new, (m = m, v = v, t = t, beta1 = beta1, beta2 = beta2, eps = eps)
 end
 
 # -----------------------------------------------------------------------------
@@ -304,7 +302,7 @@ function train_sta(;
     n_mc::Int = 256,
     hidden::Int = 512,
     step_size = 1e-3,
-    λ = 1.0f-3,
+    l2 = 1.0f-3,
     plot_path::Union{Nothing,String} = "RL_STA_training_curve.pdf",
 )
     env = STAEnv(n_time_steps; seed = seed)
@@ -333,7 +331,7 @@ function train_sta(;
         end
         batch = (states, actions, returns)
         grads = Zygote.gradient(
-            p -> pseudo_loss(p, batch, env.n_actions; λ = Float32(λ)),
+            p -> pseudo_loss(p, batch, env.n_actions; l2 = Float32(l2)),
             nn_params,
         )[1]
         nn_params, opt_state = adam_update(opt_state, nn_params, grads, Float32(step_size))
