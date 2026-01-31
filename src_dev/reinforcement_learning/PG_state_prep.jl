@@ -392,7 +392,7 @@ function plot_learning_curves(metrics; path::String = "RL_1q_training_curve.pdf"
     xlabel!(p, "episode")
     ylabel!(p, "final reward")
     plot!(p; legend = :bottomright)
-    grid!(p, true)
+    #grid(p, true)
     savefig(p, path)
     return p
 end
@@ -400,11 +400,11 @@ end
 function run_smoke_test()
     # Fast sanity check: small network + few episodes.
     nn_params, metrics = train_reinforce(
-        n_episodes = 3,
-        n_mc = 32,
-        hidden1 = 64,
-        hidden2 = 32,
-        plot_path = nothing,
+        n_episodes = 401,
+        n_mc = 300,
+        hidden1 = 512,
+        hidden2 = 256,
+        plot_path = "test_RL_1q_training_curve.pdf",
         print_every = 1,
     )
     return nn_params, metrics
